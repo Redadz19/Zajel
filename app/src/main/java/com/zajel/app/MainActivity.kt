@@ -117,7 +117,7 @@ private fun ZajelApp() {
                 var skipped = 0
                 imported.distinctBy { it.second }.forEach { (name, number) ->
                     if (dao.findByPhone(number) == null) {
-                        val id = dao.insert(Recipient(phone = number, displayName = name.ifBlank { null }, optedIn = false))
+                        val id = dao.insert(Recipient(phone = number, displayName = name.takeIf { it.isNotBlank() }, optedIn = false))
                         if (id != -1L) added++ else skipped++
                     } else skipped++
                 }
