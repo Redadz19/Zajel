@@ -55,10 +55,22 @@ private fun ZajelApp() {
     var selected by remember { mutableStateOf<Recipient?>(null) }
     var notice by remember { mutableStateOf("") }
     var showConfirm by remember { mutableStateOf(false) }
+    var showBulkConfirm by remember { mutableStateOf(false) }
+    var bulkSendPending by remember { mutableStateOf(false) }
+    var contactCandidates by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var selectedContactPhones by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showContactsPicker by remember { mutableStateOf(false) }
 
     val smsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val target = selected
-        if (granted && target != null && target.optedIn && !target.optedOut) {
+        if (granted && bulkSendPending) {
+            var sent = 0
+            recipients.filter { it.optedIn && !it.optedOut }.forEach { recipient ->
+                try { SmsManager.getDefault().sendTextMessage(recipient.phone, null, message, null, null); sent++ } catch (_: Exception) { }
+            }
+            notice = if (french) "Demandes SMS transmises : $sent." else "تم تمرير طلبات SMS إلى النظام: $sent."
+            bulkSendPending = false
+        } else if (granted && target != null && target.optedIn && !target.optedOut) {
             try {
                 SmsManager.getDefault().sendTextMessage(target.phone, null, message, null, null)
                 notice = if (french) "Demande SMS transmise à Android." else "تم تمرير طلب SMS إلى نظام Android."
@@ -112,18 +124,10 @@ private fun ZajelApp() {
                     if (number.length >= 7) imported += name to number
                 }
             }
-            scope.launch {
-                var added = 0
-                var skipped = 0
-                imported.distinctBy { it.second }.forEach { (name, number) ->
-                    if (dao.findByPhone(number) == null) {
-                        val id = dao.insert(Recipient(phone = number, displayName = name.takeIf { it.isNotBlank() }, optedIn = false))
-                        if (id != -1L) added++ else skipped++
-                    } else skipped++
-                }
-                notice = if (french) "Contacts : $added ajouté(s), $skipped ignoré(s). Consentement requis." 
-                    else "جهات الاتصال: أُضيف $added، وتم تجاوز $skipped. لا توجد موافقة تلقائية."
-            }
+            contactCandidates = imported.distinctBy { it.second }
+            selectedContactPhones = emptySet()
+            showContactsPicker = true
+            if (contactCandidates.isEmpty()) notice = if (french) "Aucun contact avec numéro." else "لا توجد جهات اتصال تحتوي على أرقام."
         } else notice = if (french) "Accès aux contacts refusé." else "تم رفض صلاحية جهات الاتصال."
     }
 
@@ -195,7 +199,16 @@ private fun ZajelApp() {
                 }
                 item { Text(if (french) "Message" else "نص الرسالة", style = MaterialTheme.typography.titleMedium) }
                 item { OutlinedTextField(message, { message = it }, label = { Text(if (french) "Votre message" else "اكتب رسالتك") }, modifier = Modifier.fillMaxWidth(), minLines = 3) }
-                item { Text(if (french) "Destinataires (${recipients.size})" else "المستلمون (${recipients.size})", style = MaterialTheme.typography.titleLarge) }
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (french) "Destinataires (${recipients.size})" else "المستلمون (${recipients.size})", style = MaterialTheme.typography.titleLarge)
+                        TextButton(onClick = {
+                            if (message.isBlank()) notice = if (french) "Saisissez un message." else "اكتب نص الرسالة أولاً."
+                            else if (recipients.none { it.optedIn && !it.optedOut }) notice = if (french) "Aucun destinataire autorisé." else "لا يوجد مستلمون لديهم موافقة."
+                            else showBulkConfirm = true
+                        }) { Text(if (french) "Envoyer à tous" else "إرسال للجميع") }
+                    }
+                }
                 items(recipients, key = { it.id }) { recipient ->
                     Card {
                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -239,11 +252,79 @@ private fun ZajelApp() {
                         }
                     }
                 }
-                item { Text(if (french) "Envoi individuel uniquement. Respectez les consentements et les règles de votre opérateur." else "الإرسال فردي فقط. لا يمكن الإرسال إلا لمن وافق، ويمكن تسجيل إيقاف الرسائل.", style = MaterialTheme.typography.bodySmall) }
+                item { Text(if (french) "L'envoi à tous concerne uniquement les contacts ayant donné leur accord et non désinscrits." else "الإرسال للجميع يشمل فقط المستلمين الذين سجلوا موافقتهم ولم يوقفوا الرسائل.", style = MaterialTheme.typography.bodySmall) }
                 if (notice.isNotBlank()) item { Text(notice, color = ZajelGreen) }
             }
         }
     }
+
+
+    if (showContactsPicker) AlertDialog(
+        onDismissRequest = { showContactsPicker = false },
+        title = { Text(if (french) "Choisir les contacts" else "اختر جهات الاتصال") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { selectedContactPhones = contactCandidates.map { it.second }.toSet() }) { Text(if (french) "Tout sélectionner" else "تحديد الكل") }
+                    TextButton(onClick = { selectedContactPhones = emptySet() }) { Text(if (french) "Tout désélectionner" else "إلغاء التحديد") }
+                }
+                LazyColumn {
+                    items(contactCandidates, key = { it.second }) { (name, number) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = number in selectedContactPhones, onCheckedChange = { checked ->
+                                selectedContactPhones = if (checked) selectedContactPhones + number else selectedContactPhones - number
+                            })
+                            Column {
+                                Text(name.ifBlank { number })
+                                if (name.isNotBlank()) Text(number, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                showContactsPicker = false
+                val chosen = contactCandidates.filter { it.second in selectedContactPhones }
+                scope.launch {
+                    var added = 0
+                    var skipped = 0
+                    chosen.forEach { (name, number) ->
+                        if (dao.findByPhone(number) == null) {
+                            val id = dao.insert(Recipient(phone = number, displayName = name.takeIf { it.isNotBlank() }, optedIn = false))
+                            if (id != -1L) added++ else skipped++
+                        } else skipped++
+                    }
+                    notice = if (french) "Contacts sélectionnés : $added ajouté(s), $skipped ignoré(s). Accord requis." else "جهات الاتصال المحددة: أُضيف $added، وتجاوزنا $skipped. الموافقة مطلوبة قبل الإرسال."
+                }
+            }) { Text(if (french) "Importer la sélection" else "استيراد المحدد") }
+        },
+        dismissButton = { TextButton(onClick = { showContactsPicker = false }) { Text(if (french) "Annuler" else "إلغاء") } }
+    )
+
+    if (showBulkConfirm) AlertDialog(
+        onDismissRequest = { showBulkConfirm = false },
+        title = { Text(if (french) "Confirmer l'envoi groupé" else "تأكيد الإرسال للجميع") },
+        text = { Text(if (french) "Envoyer le message à ${recipients.count { it.optedIn && !it.optedOut }} destinataire(s) autorisé(s) ?" else "إرسال الرسالة إلى ${recipients.count { it.optedIn && !it.optedOut }} مستلم لديهم موافقة مسجلة؟ لن تُرسل إلى من لم يوافق أو أوقف الرسائل.") },
+        confirmButton = {
+            TextButton(onClick = {
+                showBulkConfirm = false
+                val eligible = recipients.filter { it.optedIn && !it.optedOut }
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+                    var sent = 0
+                    eligible.forEach { recipient ->
+                        try { SmsManager.getDefault().sendTextMessage(recipient.phone, null, message, null, null); sent++ } catch (_: Exception) { }
+                    }
+                    notice = if (french) "Demandes SMS transmises : $sent." else "تم تمرير طلبات SMS إلى النظام: $sent."
+                } else {
+                    bulkSendPending = true
+                    smsPermission.launch(Manifest.permission.SEND_SMS)
+                }
+            }) { Text(if (french) "Envoyer" else "إرسال") }
+        },
+        dismissButton = { TextButton(onClick = { showBulkConfirm = false }) { Text(if (french) "Annuler" else "إلغاء") } }
+    )
 
     if (showConfirm) AlertDialog(
         onDismissRequest = { showConfirm = false; selected = null },
