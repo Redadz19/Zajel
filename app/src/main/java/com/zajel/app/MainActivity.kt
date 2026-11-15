@@ -21,9 +21,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.room.Room
+import com.zajel.app.data.Recipient
+import com.zajel.app.data.ZajelDatabase
+import kotlinx.coroutines.launch
 
 private val ZajelGreen = Color(0xFF078F83)
-private data class Recipient(val phone: String)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,25 +39,31 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ZajelApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val database = remember {
+        Room.databaseBuilder(context.applicationContext, ZajelDatabase::class.java, "zajel.db").build()
+    }
+    val dao = remember { database.recipientDao() }
+    val scope = rememberCoroutineScope()
+    val recipients by dao.observeAll().collectAsState(initial = emptyList())
+
     var french by remember { mutableStateOf(false) }
     var phone by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     var consent by remember { mutableStateOf(false) }
-    var recipients by remember { mutableStateOf(listOf<Recipient>()) }
     var selected by remember { mutableStateOf<Recipient?>(null) }
     var notice by remember { mutableStateOf("") }
     var showConfirm by remember { mutableStateOf(false) }
 
     val smsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val target = selected
-        if (granted && target != null) {
+        if (granted && target != null && target.optedIn && !target.optedOut) {
             try {
                 SmsManager.getDefault().sendTextMessage(target.phone, null, message, null, null)
                 notice = if (french) "Demande SMS transmise à Android." else "تم تمرير طلب SMS إلى نظام Android."
             } catch (e: Exception) {
                 notice = (if (french) "Échec : " else "تعذر الإرسال: ") + (e.message ?: "SMS")
             }
-        } else notice = if (french) "Permission SMS refusée." else "تم رفض صلاحية الرسائل."
+        } else notice = if (french) "Permission refusée ou consentement absent." else "الصلاحية مرفوضة أو الموافقة غير متوفرة."
         selected = null
     }
 
@@ -88,29 +97,59 @@ private fun ZajelApp() {
                 item {
                     Button(onClick = {
                         val p = phone.trim()
-                        if (p.length >= 7 && p !in recipients.map { it.phone } && consent) {
-                            recipients = recipients + Recipient(p); phone = ""; consent = false
-                            notice = if (french) "Destinataire ajouté." else "تمت إضافة المستلم."
+                        if (p.length >= 7 && consent) {
+                            scope.launch {
+                                val id = dao.insert(Recipient(phone = p, optedIn = true))
+                                notice = if (id == -1L) {
+                                    if (french) "Numéro déjà enregistré." else "الرقم مسجل مسبقاً."
+                                } else {
+                                    if (french) "Destinataire enregistré sur cet appareil." else "تم حفظ المستلم على هذا الجهاز."
+                                }
+                                if (id != -1L) { phone = ""; consent = false }
+                            }
                         } else notice = if (!consent) (if (french) "Consentement requis." else "يجب تأكيد موافقة المستلم.")
-                            else (if (french) "Numéro invalide ou déjà ajouté." else "الرقم غير صالح أو مضاف مسبقاً.")
+                            else (if (french) "Numéro invalide." else "رقم الهاتف غير صالح.")
                     }, modifier = Modifier.fillMaxWidth()) { Text(if (french) "Ajouter" else "إضافة المستلم") }
                 }
                 item { Text(if (french) "Message" else "نص الرسالة", style = MaterialTheme.typography.titleMedium) }
                 item { OutlinedTextField(message, { message = it }, label = { Text(if (french) "Votre message" else "اكتب رسالتك") }, modifier = Modifier.fillMaxWidth(), minLines = 3) }
                 item { Text(if (french) "Destinataires (${recipients.size})" else "المستلمون (${recipients.size})", style = MaterialTheme.typography.titleLarge) }
-                items(recipients, key = { it.phone }) { recipient ->
+                items(recipients, key = { it.id }) { recipient ->
                     Card {
-                        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(recipient.phone, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                            TextButton(onClick = { recipients = recipients.filterNot { it.phone == recipient.phone } }) { Text(if (french) "Supprimer" else "حذف") }
-                            Button(onClick = {
-                                if (message.isBlank()) notice = if (french) "Saisissez un message." else "اكتب نص الرسالة أولاً."
-                                else { selected = recipient; showConfirm = true }
-                            }) { Text(if (french) "Envoyer" else "إرسال") }
+                        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(recipient.phone, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                if (recipient.optedOut) (if (french) "Désinscrit" else "أوقف استقبال الرسائل")
+                                else if (recipient.optedIn) (if (french) "Consentement enregistré" else "الموافقة مسجلة")
+                                else (if (french) "Consentement absent" else "لا توجد موافقة"),
+                                color = if (recipient.optedOut) Color(0xFFB3261E) else ZajelGreen,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    enabled = recipient.optedIn && !recipient.optedOut,
+                                    onClick = {
+                                        if (message.isBlank()) notice = if (french) "Saisissez un message." else "اكتب نص الرسالة أولاً."
+                                        else { selected = recipient; showConfirm = true }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text(if (french) "Envoyer" else "إرسال") }
+                                OutlinedButton(onClick = {
+                                    scope.launch {
+                                        if (!recipient.optedOut) {
+                                            dao.optOut(recipient.phone)
+                                            notice = if (french) "Désinscription enregistrée." else "تم تسجيل إيقاف الرسائل لهذا الرقم."
+                                        } else {
+                                            dao.delete(recipient)
+                                            notice = if (french) "Destinataire supprimé." else "تم حذف المستلم."
+                                        }
+                                    }
+                                }) { Text(if (recipient.optedOut) (if (french) "Supprimer" else "حذف") else (if (french) "Désinscrire" else "إيقاف")) }
+                            }
                         }
                     }
                 }
-                item { Text(if (french) "Envoi individuel uniquement. Vérifiez les consentements et les règles de votre opérateur." else "الإرسال فردي فقط. تأكد من الموافقات والتزم بسياسات شركة الاتصالات.", style = MaterialTheme.typography.bodySmall) }
+                item { Text(if (french) "Envoi individuel uniquement. Respectez les consentements et les règles de votre opérateur." else "الإرسال فردي فقط. لا يمكن الإرسال إلا لمن وافق، ويمكن تسجيل إيقاف الرسائل.", style = MaterialTheme.typography.bodySmall) }
                 if (notice.isNotBlank()) item { Text(notice, color = ZajelGreen) }
             }
         }
@@ -123,15 +162,16 @@ private fun ZajelApp() {
         confirmButton = {
             TextButton(onClick = {
                 showConfirm = false
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
-                    val target = selected
-                    if (target != null) {
-                        try {
-                            SmsManager.getDefault().sendTextMessage(target.phone, null, message, null, null)
-                            notice = if (french) "Demande SMS transmise à Android." else "تم تمرير طلب SMS إلى Android."
-                        } catch (e: Exception) { notice = e.message ?: "SMS error" }
-                        selected = null
-                    }
+                val target = selected
+                if (target == null || !target.optedIn || target.optedOut) {
+                    notice = if (french) "Consentement invalide." else "لا توجد موافقة صالحة لهذا المستلم."
+                    selected = null
+                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+                    try {
+                        SmsManager.getDefault().sendTextMessage(target.phone, null, message, null, null)
+                        notice = if (french) "Demande SMS transmise à Android." else "تم تمرير طلب SMS إلى Android."
+                    } catch (e: Exception) { notice = e.message ?: "SMS error" }
+                    selected = null
                 } else smsPermission.launch(Manifest.permission.SEND_SMS)
             }) { Text(if (french) "Envoyer" else "إرسال") }
         },
