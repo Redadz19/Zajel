@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
-    <application android:allowBackup="true" android:label="زاجل ZAJEL"
+    <application android:icon="@drawable/zajel_logo" android:roundIcon="@drawable/zajel_logo" android:allowBackup="true" android:label="زاجل ZAJEL"
         android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
