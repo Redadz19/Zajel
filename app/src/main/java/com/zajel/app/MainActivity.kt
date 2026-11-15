@@ -27,8 +27,29 @@ import com.zajel.app.data.Recipient
 import com.zajel.app.data.ZajelDatabase
 import com.zajel.app.importing.CsvReader
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 private val ZajelGreen = Color(0xFF078F83)
+
+private data class BulkSendResult(val accepted: Int, val failed: Int)
+
+private suspend fun sendBulkSms(phoneNumbers: List<String>, body: String): BulkSendResult {
+    val manager = SmsManager.getDefault()
+    var accepted = 0
+    var failed = 0
+    phoneNumbers.forEachIndexed { index, phone ->
+        try {
+            val parts = manager.divideMessage(body)
+            if (parts.size > 1) manager.sendMultipartTextMessage(phone, null, parts, null, null)
+            else manager.sendTextMessage(phone, null, body, null, null)
+            accepted++
+        } catch (_: Exception) {
+            failed++
+        }
+        if (index < phoneNumbers.lastIndex) delay(1_500)
+    }
+    return BulkSendResult(accepted, failed)
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,6 +78,9 @@ private fun ZajelApp() {
     var showConfirm by remember { mutableStateOf(false) }
     var showBulkConfirm by remember { mutableStateOf(false) }
     var bulkSendPending by remember { mutableStateOf(false) }
+    var pendingBulkPhones by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingBulkMessage by remember { mutableStateOf("") }
+    var bulkSending by remember { mutableStateOf(false) }
     var contactCandidates by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var selectedContactPhones by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showContactsPicker by remember { mutableStateOf(false) }
@@ -64,13 +88,16 @@ private fun ZajelApp() {
     val smsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val target = selected
         if (granted && bulkSendPending) {
-            var sent = 0
-            recipients.filter { it.optedIn && !it.optedOut }.forEach { recipient ->
-                try { SmsManager.getDefault().sendTextMessage(recipient.phone, null, message, null, null); sent++ } catch (_: Exception) { }
-            }
-            notice = if (french) "Demandes SMS transmises : $sent." else "تم تمرير طلبات SMS إلى النظام: $sent."
             bulkSendPending = false
-        } else if (granted && target != null && target.optedIn && !target.optedOut) {
+            bulkSending = true
+            scope.launch {
+                val result = sendBulkSms(pendingBulkPhones, pendingBulkMessage)
+                notice = if (french) "Accepted by Android: ${result.accepted}. Failed: ${result.failed}." else "قبل نظام Android إرسال ${result.accepted} رسالة. تعذّر تمرير ${result.failed}."
+                bulkSending = false
+                pendingBulkPhones = emptyList()
+                pendingBulkMessage = ""
+            }
+        } else if (target != null && granted && target.optedIn && !target.optedOut) {
             try {
                 SmsManager.getDefault().sendTextMessage(target.phone, null, message, null, null)
                 notice = if (french) "Demande SMS transmise à Android." else "تم تمرير طلب SMS إلى نظام Android."
@@ -252,7 +279,15 @@ private fun ZajelApp() {
                         }
                     }
                 }
-                item { Text(if (french) "L'envoi à tous concerne uniquement les contacts ayant donné leur accord et non désinscrits." else "الإرسال للجميع يشمل فقط المستلمين الذين سجلوا موافقتهم ولم يوقفوا الرسائل.", style = MaterialTheme.typography.bodySmall) }
+                item {
+                    if (bulkSending) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Text(if (french) "Envoi progressif en cours..." else "جارٍ الإرسال بالتتابع...")
+                        }
+                    }
+                    Text(if (french) "L'envoi à tous concerne uniquement les contacts ayant donné leur accord et non désinscrits." else "الإرسال للجميع يشمل فقط المستلمين الذين سجلوا موافقتهم ولم يوقفوا الرسائل.", style = MaterialTheme.typography.bodySmall)
+                }
                 if (notice.isNotBlank()) item { Text(notice, color = ZajelGreen) }
             }
         }
@@ -311,12 +346,17 @@ private fun ZajelApp() {
             TextButton(onClick = {
                 showBulkConfirm = false
                 val eligible = recipients.filter { it.optedIn && !it.optedOut }
+                pendingBulkPhones = eligible.map { it.phone }
+                pendingBulkMessage = message
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
-                    var sent = 0
-                    eligible.forEach { recipient ->
-                        try { SmsManager.getDefault().sendTextMessage(recipient.phone, null, message, null, null); sent++ } catch (_: Exception) { }
+                    bulkSending = true
+                    scope.launch {
+                        val result = sendBulkSms(pendingBulkPhones, pendingBulkMessage)
+                        notice = if (french) "Accepted by Android: ${result.accepted}. Failed: ${result.failed}." else "قبل نظام Android إرسال ${result.accepted} رسالة. تعذّر تمرير ${result.failed}."
+                        bulkSending = false
+                        pendingBulkPhones = emptyList()
+                        pendingBulkMessage = ""
                     }
-                    notice = if (french) "Demandes SMS transmises : $sent." else "تم تمرير طلبات SMS إلى النظام: $sent."
                 } else {
                     bulkSendPending = true
                     smsPermission.launch(Manifest.permission.SEND_SMS)
