@@ -11,8 +11,25 @@ android {
         applicationId = "com.zajel.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+    signingConfigs {
+        create("release") {
+            val storeFilePath = System.getenv("ZAJEL_KEYSTORE_FILE")
+            if (!storeFilePath.isNullOrBlank()) {
+                storeFile = file(storeFilePath)
+                storePassword = System.getenv("ZAJEL_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ZAJEL_KEY_ALIAS")
+                keyPassword = System.getenv("ZAJEL_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = false
+        }
     }
     buildFeatures { compose = true }
     compileOptions {
