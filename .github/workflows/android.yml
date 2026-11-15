@@ -19,9 +19,31 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
-      - uses: actions/upload-artifact@v4
+      - name: Build APK
+        env:
+          ZAJEL_KEYSTORE_BASE64: ${{ secrets.ZAJEL_KEYSTORE_BASE64 }}
+          ZAJEL_KEYSTORE_PASSWORD: ${{ secrets.ZAJEL_KEYSTORE_PASSWORD }}
+          ZAJEL_KEY_ALIAS: ${{ secrets.ZAJEL_KEY_ALIAS }}
+          ZAJEL_KEY_PASSWORD: ${{ secrets.ZAJEL_KEY_PASSWORD }}
+        run: |
+          if [ -n "$ZAJEL_KEYSTORE_BASE64" ]; then
+            echo "$ZAJEL_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/zajel-release.jks"
+            export ZAJEL_KEYSTORE_FILE="$RUNNER_TEMP/zajel-release.jks"
+            gradle --no-daemon :app:assembleRelease
+          else
+            echo "Stable signing secrets are not configured; building debug APK only."
+            gradle --no-daemon :app:assembleDebug
+          fi
+      - name: Upload signed update APK
+        if: success() && env.ZAJEL_KEYSTORE_BASE64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: zajel-update-apk
+          path: app/build/outputs/apk/release/app-release.apk
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
           name: zajel-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore
