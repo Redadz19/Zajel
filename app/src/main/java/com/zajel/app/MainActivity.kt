@@ -3,6 +3,7 @@ package com.zajel.app
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.ContactsContract
 import android.telephony.SmsManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,6 +25,7 @@ import androidx.core.content.ContextCompat
 import androidx.room.Room
 import com.zajel.app.data.Recipient
 import com.zajel.app.data.ZajelDatabase
+import com.zajel.app.importing.CsvReader
 import kotlinx.coroutines.launch
 
 private val ZajelGreen = Color(0xFF078F83)
@@ -67,6 +69,64 @@ private fun ZajelApp() {
         selected = null
     }
 
+    val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            try {
+                val csv = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val rows = CsvReader.recipientRows(csv)
+                scope.launch {
+                    var added = 0
+                    var skipped = 0
+                    rows.forEach { (name, number) ->
+                        if (dao.findByPhone(number) == null) {
+                            val id = dao.insert(Recipient(phone = number, displayName = name, optedIn = false))
+                            if (id != -1L) added++ else skipped++
+                        } else skipped++
+                    }
+                    notice = if (french) "Import CSV : $added ajouté(s), $skipped ignoré(s). Consentement à confirmer." 
+                        else "استيراد CSV: أُضيف $added، وتم تجاوز $skipped. يجب تأكيد الموافقة قبل الإرسال."
+                }
+            } catch (e: Exception) {
+                notice = (if (french) "Erreur de lecture CSV : " else "تعذر قراءة ملف CSV: ") + (e.message ?: "")
+            }
+        }
+    }
+
+    val contactsPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            val imported = mutableListOf<Pair<String, String>>()
+            val projection = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            )
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                projection, null, null,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+            )?.use { cursor ->
+                val nameColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val numberColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                while (cursor.moveToNext()) {
+                    val number = if (numberColumn >= 0) cursor.getString(numberColumn)?.trim().orEmpty() else ""
+                    val name = if (nameColumn >= 0) cursor.getString(nameColumn)?.trim().orEmpty() else ""
+                    if (number.length >= 7) imported += name to number
+                }
+            }
+            scope.launch {
+                var added = 0
+                var skipped = 0
+                imported.distinctBy { it.second }.forEach { (name, number) ->
+                    if (dao.findByPhone(number) == null) {
+                        val id = dao.insert(Recipient(phone = number, displayName = name.ifBlank { null }, optedIn = false))
+                        if (id != -1L) added++ else skipped++
+                    } else skipped++
+                }
+                notice = if (french) "Contacts : $added ajouté(s), $skipped ignoré(s). Consentement requis." 
+                    else "جهات الاتصال: أُضيف $added، وتم تجاوز $skipped. لا توجد موافقة تلقائية."
+            }
+        } else notice = if (french) "Accès aux contacts refusé." else "تم رفض صلاحية جهات الاتصال."
+    }
+
     MaterialTheme(colorScheme = lightColorScheme(primary = ZajelGreen)) {
         Scaffold(topBar = {
             TopAppBar(title = { Text("زاجل | ZAJEL") }, actions = {
@@ -99,7 +159,7 @@ private fun ZajelApp() {
                         val p = phone.trim()
                         if (p.length >= 7 && consent) {
                             scope.launch {
-                                val id = dao.insert(Recipient(phone = p, optedIn = true))
+                                val id = if (dao.findByPhone(p) == null) dao.insert(Recipient(phone = p, optedIn = true)) else -1L
                                 notice = if (id == -1L) {
                                     if (french) "Numéro déjà enregistré." else "الرقم مسجل مسبقاً."
                                 } else {
@@ -111,21 +171,51 @@ private fun ZajelApp() {
                             else (if (french) "Numéro invalide." else "رقم الهاتف غير صالح.")
                     }, modifier = Modifier.fillMaxWidth()) { Text(if (french) "Ajouter" else "إضافة المستلم") }
                 }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { csvPicker.launch("text/*") }, modifier = Modifier.weight(1f)) {
+                            Text(if (french) "Importer CSV" else "استيراد CSV")
+                        }
+                        OutlinedButton(onClick = {
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                                contactsPermission.launch(Manifest.permission.READ_CONTACTS)
+                            } else contactsPermission.launch(Manifest.permission.READ_CONTACTS)
+                        }, modifier = Modifier.weight(1f)) {
+                            Text(if (french) "Contacts" else "جهات الاتصال")
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        if (french) "Les imports n'accordent jamais le consentement automatiquement. Confirmez-le uniquement après accord réel."
+                        else "الاستيراد لا يمنح الموافقة تلقائياً. لا تؤكد الموافقة إلا بعد الحصول عليها فعلياً.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF6B625B)
+                    )
+                }
                 item { Text(if (french) "Message" else "نص الرسالة", style = MaterialTheme.typography.titleMedium) }
                 item { OutlinedTextField(message, { message = it }, label = { Text(if (french) "Votre message" else "اكتب رسالتك") }, modifier = Modifier.fillMaxWidth(), minLines = 3) }
                 item { Text(if (french) "Destinataires (${recipients.size})" else "المستلمون (${recipients.size})", style = MaterialTheme.typography.titleLarge) }
                 items(recipients, key = { it.id }) { recipient ->
                     Card {
                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(recipient.phone, style = MaterialTheme.typography.titleMedium)
+                            Text(recipient.displayName?.takeIf { it.isNotBlank() }?.let { "$it • ${recipient.phone}" } ?: recipient.phone, style = MaterialTheme.typography.titleMedium)
                             Text(
                                 if (recipient.optedOut) (if (french) "Désinscrit" else "أوقف استقبال الرسائل")
                                 else if (recipient.optedIn) (if (french) "Consentement enregistré" else "الموافقة مسجلة")
-                                else (if (french) "Consentement absent" else "لا توجد موافقة"),
+                                else (if (french) "Consentement à confirmer" else "الموافقة غير مؤكدة"),
                                 color = if (recipient.optedOut) Color(0xFFB3261E) else ZajelGreen,
                                 style = MaterialTheme.typography.bodySmall
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (!recipient.optedIn && !recipient.optedOut) {
+                                    OutlinedButton(onClick = {
+                                        scope.launch {
+                                            dao.confirmConsent(recipient.phone)
+                                            notice = if (french) "Consentement confirmé. Assurez-vous qu'il est réel." else "تم تسجيل الموافقة. تأكد من وجود موافقة فعلية."
+                                        }
+                                    }) { Text(if (french) "Confirmer accord" else "تأكيد الموافقة") }
+                                }
                                 Button(
                                     enabled = recipient.optedIn && !recipient.optedOut,
                                     onClick = {
