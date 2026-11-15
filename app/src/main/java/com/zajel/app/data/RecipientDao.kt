@@ -14,6 +14,9 @@ interface RecipientDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(recipient: Recipient): Long
 
+    @Query("UPDATE recipients SET optedIn = 1, optedOut = 0 WHERE phone = :phone")
+    suspend fun confirmConsent(phone: String)
+
     @Query("UPDATE recipients SET optedOut = 1 WHERE phone = :phone")
     suspend fun optOut(phone: String)
 
